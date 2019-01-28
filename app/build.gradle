@@ -26,10 +26,7 @@ android {
             path "CMakeLists.txt"
         }
     }
-    aaptOptions {
-        noCompress "tflite"
-        noCompress "lite"
-    }
+
 }
 
 dependencies {

@@ -1,5 +1,6 @@
 package com.harsukh.singh.depthdetector;
 
+import android.Manifest;
 import android.content.Context;
 import android.content.res.Configuration;
 import android.graphics.ImageFormat;
@@ -22,7 +23,9 @@ import android.media.ImageReader;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.provider.ContactsContract;
 import android.support.annotation.NonNull;
+import android.support.v4.content.ContextCompat;
 import android.support.v7.app.AppCompatActivity;
 import android.util.Log;
 import android.util.Size;
@@ -30,6 +33,7 @@ import android.util.SparseIntArray;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
+import android.widget.TextView;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -42,6 +46,11 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+
+import static android.content.pm.PackageManager.PERMISSION_GRANTED;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -51,6 +60,9 @@ public class MainActivity extends AppCompatActivity {
     private static final SparseIntArray ORIENTATIONS = new SparseIntArray();
 
     private static final String TAG = "MainActivity";
+
+    private static final String LABEL_PATH = "labels.txt";
+    private static final String NETWORK = "mobilenet_v1_1.0_224.tflite";
 
     /**
      * Camera state: Showing camera preview.
@@ -131,6 +143,14 @@ public class MainActivity extends AppCompatActivity {
      * This is the output file for our picture.
      */
     private File mFile;
+
+    /**
+     * Classifier lock
+     */
+    private static final Lock classifierLock = new ReentrantLock();
+    private static final Condition classifierReadyCondition = classifierLock.newCondition();
+    private ImageClassifier imageClassifier;
+
     /**
      * This a callback object for the {@link ImageReader}. "onImageAvailable" will be called when a
      * still image is ready to be saved.
@@ -316,20 +336,31 @@ public class MainActivity extends AppCompatActivity {
         }
         return choices[0];
     }
-
+    private TextView results;
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         mTextureView = findViewById(R.id.texture);
         mFile = new File(getExternalFilesDir(null), "pic.jpg");
+        results = findViewById(R.id.recognition_results);
+        Thread thread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                classifierLock.lock();
+                try {
+                    imageClassifier = ImageClassifier.create(getAssets(), NETWORK, LABEL_PATH);
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    classifierReadyCondition.signal();
+                    finish();
+                }
+                classifierReadyCondition.signal();
+                classifierLock.unlock();
+            }
+        });
+        thread.start();
     }
-
-//    /**
-//     * A native method that is implemented by the 'native-lib' native library,
-//     * which is packaged with this application.
-//     */
-//    public native String stringFromJNI();
 
 
 
@@ -356,6 +387,11 @@ public class MainActivity extends AppCompatActivity {
         super.onPause();
     }
 
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        imageClassifier.close();
+    }
 
     /**
      * Sets up member variables related to camera.
@@ -466,6 +502,10 @@ public class MainActivity extends AppCompatActivity {
         setUpCameraOutputs(width, height);
         configureTransform(width, height);
         CameraManager manager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
+        int accepted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA);
+        if(accepted != PERMISSION_GRANTED){
+            finish();
+        }
         try {
             if (!mCameraOpenCloseLock.tryAcquire(2500, TimeUnit.MILLISECONDS)) {
                 throw new RuntimeException("Time out waiting to lock camera opening.");
@@ -694,6 +734,14 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    @NonNull
+    public void setResults(List<Classifier.Recognition> recognitionList){
+        results.setVisibility(View.VISIBLE);
+        for(Classifier.Recognition recognition: recognitionList){
+            results.append(recognition.toString() + " ");
+        }
+    }
+
     /**
      * Retrieves the JPEG orientation from the specified screen rotation.
      *
@@ -748,7 +796,7 @@ public class MainActivity extends AppCompatActivity {
     /**
      * Saves a JPEG {@link Image} into the specified {@link File}.
      */
-    private static class ImageSaver implements Runnable {
+    private class ImageSaver implements Runnable {
 
         /**
          * The JPEG image
@@ -766,7 +814,20 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void run() {
+            classifierLock.lock();
+            while(!imageClassifier.isReady()){
+                try {
+                    classifierReadyCondition.await();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                    return;
+                }
+            }
+            classifierLock.unlock();
             ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+            List<Classifier.Recognition> results = imageClassifier.recognizeImage(buffer);
+            setResults(results);
+            //pass this byte buffer into the classifier
             byte[] bytes = new byte[buffer.remaining()];
             buffer.get(bytes);
             FileOutputStream output = null;

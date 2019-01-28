@@ -2,6 +2,7 @@ package com.harsukh.singh.depthdetector;
 
 import android.graphics.Bitmap;
 
+import java.nio.ByteBuffer;
 import java.util.List;
 
 /**
@@ -68,11 +69,7 @@ public interface Classifier {
         }
     }
 
-    List<Recognition> recognizeImage(Bitmap bitmap);
-
-    void enableStatLogging(final boolean debug);
-
-    String getStatString();
+    List<Recognition> recognizeImage(ByteBuffer buffer);
 
     void close();
 }
